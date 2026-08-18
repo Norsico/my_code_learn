@@ -1,0 +1,23 @@
+# 编程环境
+.venv
+# env
+*.env
+
+# 日志
+__pycache__
+helloagents/memory
+
+# 系统
+.DS_Store
+
+# 其它
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+tool-output/
+memory/
