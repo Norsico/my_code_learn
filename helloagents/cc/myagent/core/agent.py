@@ -3,7 +3,7 @@ Agent：维护对话历史，驱动模型与工具的循环。
 
 - add_message()：写入 user、assistant 或 tool 消息
 - run()：调用模型、执行工具、回传结果并返回最终回答
-- _print_tool_call()：在终端显示工具调用摘要
+- hooks：在 Agent 生命周期节点插入日志、权限等应用逻辑
 """
 
 import json
@@ -11,6 +11,7 @@ from typing import Any
 
 from .llm import LLM
 from .tool import Tool
+from .hooks import HookContext, HookEvent, Hooks
 
 
 class Agent:
@@ -20,13 +21,18 @@ class Agent:
         system_prompt: str,
         tools: list[Tool] | None = None,
         max_steps: int | None = None,
+        hooks: Hooks | None = None,
     ) -> None:
         self.llm = llm
         # 工具名用于匹配模型返回的 tool_call。
         self.tools = {tool.name: tool for tool in tools or []}
         self.max_steps = max_steps
+        self.hooks = hooks or Hooks()
         self.messages = []
         self.add_message("system", system_prompt)
+
+    def __str__(self) -> str:
+        return f"Agent(tools={list(self.tools)}, messages={len(self.messages)})"
 
     def add_message(
         self,
@@ -45,23 +51,8 @@ class Agent:
             message["tool_call_id"] = tool_call_id
         self.messages.append(message)
 
-    def _print_tool_call(
-        self,
-        name: str,
-        arguments: dict[str, Any],
-        result: str,
-    ) -> None:
-        # 终端仅显示工具调用摘要，完整结果仍保留给模型。
-        arguments_text = json.dumps(arguments, ensure_ascii=False)
-        result_lines = result.splitlines()[:2]
-        result_text = " / ".join(result_lines) or "(no output)"
-        if len(arguments_text) > 100:
-            arguments_text = arguments_text[:97] + "..."
-        if len(result_text) > 160:
-            result_text = result_text[:157] + "..."
-        print(f"\033[2;37m[tool] {name}({arguments_text}) → {result_text}\033[0m")
-
     def run(self, query: str) -> str:
+        self.hooks.emit(HookEvent.USER_PROMPT_SUBMIT, HookContext(self, query=query))
         self.add_message("user", query)
 
         steps = 0
@@ -80,6 +71,7 @@ class Agent:
             )
 
             if not message.tool_calls:
+                self.hooks.emit(HookEvent.STOP, HookContext(self))
                 return message.content or ""
 
             # 执行模型请求的工具，并把结果写回对话历史。
@@ -101,15 +93,26 @@ class Agent:
                             f"Available tools: {available_tools}"
                         )
                     else:
-                        try:
-                            result = tool.run(arguments)
-                        except Exception as error:
-                            result = (
-                                f"Tool execution error for '{tool_name}': "
-                                f"{type(error).__name__}: {error}"
-                            )
-
-                self._print_tool_call(tool_name, arguments, result)
+                        blocked = self.hooks.emit(
+                            HookEvent.PRE_TOOL_USE,
+                            HookContext(self, tool=tool, arguments=arguments),
+                            stop_on_result=True,
+                        )
+                        if blocked:
+                            result = str(blocked)
+                        else:
+                            try:
+                                result = tool.run(arguments)
+                            except Exception as error:
+                                result = (
+                                    f"Tool execution error for '{tool_name}': "
+                                    f"{type(error).__name__}: {error}"
+                                )
+                # 工具成功、失败或被拒绝后都触发同一个事件。
+                self.hooks.emit(
+                    HookEvent.POST_TOOL_USE,
+                    HookContext(self, tool_name=tool_name, arguments=arguments, result=result),
+                )
                 self.add_message(
                     "tool",
                     result,
@@ -123,4 +126,5 @@ class Agent:
             tool_choice="none",
         )
         self.add_message("assistant", message.content)
+        self.hooks.emit(HookEvent.STOP, HookContext(self))
         return message.content or ""
