@@ -21,3 +21,5 @@ helloagents/memory
 *.db
 tool-output/
 memory/
+
+deepseek-harness
